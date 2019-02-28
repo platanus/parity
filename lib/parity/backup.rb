@@ -1,4 +1,5 @@
 require "etc"
+require "erb"
 
 module Parity
   class Backup
@@ -6,10 +7,15 @@ module Parity
     DATABASE_YML_RELATIVE_PATH = "config/database.yml".freeze
     DEVELOPMENT_ENVIRONMENT_KEY_NAME = "development".freeze
     DATABASE_KEY_NAME = "database".freeze
+    DATABASE_USERNAME_KEY_NAME = "username".freeze
+    DATABASE_PASSWORD_KEY_NAME = "password".freeze
+    DATABASE_HOST_KEY_NAME = "host".freeze
+    DATABASE_PORT_KEY_NAME = "port".freeze
 
     def initialize(args)
       @from, @to = args.values_at(:from, :to)
       @additional_args = args[:additional_args] || BLANK_ARGUMENTS
+      @connection_flags = connection_flags
     end
 
     def restore
@@ -24,7 +30,7 @@ module Parity
 
     private
 
-    attr_reader :additional_args, :from, :to
+    attr_reader :additional_args, :connection_flags, :database_config, :from, :to
 
     def restore_from_development
       reset_remote_database
@@ -45,7 +51,7 @@ module Parity
 
     def wipe_development_database
       Kernel.system(
-        "dropdb --if-exists #{development_db} && createdb #{development_db}",
+        "dropdb #{connection_flags} --if-exists #{development_db} && createdb #{connection_flags} #{development_db}",
       )
     end
 
@@ -74,7 +80,7 @@ module Parity
       Kernel.system(
         "pg_restore tmp/latest.backup --verbose --clean --no-acl --no-owner "\
           "--dbname #{development_db} --jobs=#{processor_cores} "\
-          "#{additional_args}",
+          "#{connection_flags} #{additional_args}",
       )
     end
 
@@ -84,7 +90,7 @@ module Parity
 
     def delete_rails_production_environment_settings
       Kernel.system(<<-SHELL)
-        psql #{development_db} -c "CREATE TABLE IF NOT EXISTS public.ar_internal_metadata (key character varying NOT NULL, value character varying, created_at timestamp without time zone NOT NULL, updated_at timestamp without time zone NOT NULL, CONSTRAINT ar_internal_metadata_pkey PRIMARY KEY (key)); UPDATE ar_internal_metadata SET value = 'development' WHERE key = 'environment'"
+        psql #{development_db} #{connection_flags} -c "CREATE TABLE IF NOT EXISTS public.ar_internal_metadata (key character varying NOT NULL, value character varying, created_at timestamp without time zone NOT NULL, updated_at timestamp without time zone NOT NULL, CONSTRAINT ar_internal_metadata_pkey PRIMARY KEY (key)); UPDATE ar_internal_metadata SET value = 'development' WHERE key = 'environment'"
       SHELL
     end
 
@@ -104,14 +110,51 @@ module Parity
       "heroku pg:backups:url --remote #{from}"
     end
 
+    def connection_flags
+      flags = []
+      flags << "--username #{development_user}" unless development_user.nil?
+      flags << "--password #{development_password}" unless development_password.nil?
+      flags << "--host #{development_host}" unless development_host.nil?
+      flags << "--port #{development_port}" unless development_port.nil?
+      flags.join(' ')
+    end
+
     def development_db
-      YAML.load(database_yaml_file).
+      database_config.
         fetch(DEVELOPMENT_ENVIRONMENT_KEY_NAME).
         fetch(DATABASE_KEY_NAME)
     end
 
+    def development_user
+      database_config.
+        fetch(DEVELOPMENT_ENVIRONMENT_KEY_NAME).
+        fetch(DATABASE_USERNAME_KEY_NAME, nil)
+    end
+
+    def development_password
+      database_config.
+        fetch(DEVELOPMENT_ENVIRONMENT_KEY_NAME).
+        fetch(DATABASE_PASSWORD_KEY_NAME, nil)
+    end
+
+    def development_host
+      database_config.
+        fetch(DEVELOPMENT_ENVIRONMENT_KEY_NAME).
+        fetch(DATABASE_HOST_KEY_NAME, nil)
+    end
+
+    def development_port
+      database_config.
+        fetch(DEVELOPMENT_ENVIRONMENT_KEY_NAME).
+        fetch(DATABASE_PORT_KEY_NAME, nil)
+    end
+
+    def database_config
+      @database_config ||= YAML.load(database_yaml_file)
+    end
+
     def database_yaml_file
-      IO.read(DATABASE_YML_RELATIVE_PATH)
+      ERB.new(IO.read(DATABASE_YML_RELATIVE_PATH)).result(binding)
     end
 
     def processor_cores
